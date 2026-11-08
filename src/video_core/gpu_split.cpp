@@ -47,6 +47,23 @@ void Pause() {
 
 [[maybe_unused]] std::atomic<u32> g_back_thread_id{};
 
+// Fork do Rodrigo: EDEN_NX2_SPLIT_SPIN_PCT=<1..100> scales the split threads' busy-wait spins
+// (front drain/backoff and the back's idle spin) to that percentage before they yield or sleep.
+// The defaults were tuned on 8+ thread CPUs; on a 4-thread CPU a spinning critical-priority
+// thread takes the core from the thread it waits for. Unset or 100: upstream behaviour.
+u32 ScaledSpins(u32 spins) {
+    static const u32 pct = [] {
+        const char* text = std::getenv("EDEN_NX2_SPLIT_SPIN_PCT");
+        const long value = text ? std::strtol(text, nullptr, 10) : 100;
+        const u32 clamped = static_cast<u32>(std::clamp(value, 1L, 100L));
+        if (clamped != 100) {
+            LOG_INFO(HW_GPU, "EDEN_NX2_SPLIT_SPIN_PCT={}: split spins scaled", clamped);
+        }
+        return clamped;
+    }();
+    return (std::max)(spins * pct / 100, 1u);
+}
+
 } // Anonymous namespace
 
 void GpuSplit::CheckOwner(const char* where) {
@@ -237,7 +254,7 @@ void GpuSplit::WaitForSpace(size_t words) {
         if (write_position + words - consumed_cache <= RingWords) {
             return;
         }
-        if (spins < 4096) {
+        if (spins < ScaledSpins(4096)) {
             Pause();
         } else {
             std::this_thread::yield();
@@ -306,7 +323,7 @@ bool GpuSplit::WaitFor(u64 target, DrainSite site) {
 }
 
 void GpuSplit::Backoff(u32 spins, u64 target) {
-    if (spins < 16384) {
+    if (spins < ScaledSpins(16384)) {
         Pause();
         return;
     }
@@ -485,7 +502,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
         if (available == read_position) {
             Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWait};
             // The front usually sends more within microseconds: spin briefly before sleeping.
-            for (u32 spins = 0; spins < 8192 && available == read_position &&
+            for (u32 spins = 0; spins < ScaledSpins(8192) && available == read_position &&
                                 !hook_requested.load(std::memory_order_relaxed);
                  ++spins) {
                 Pause();
