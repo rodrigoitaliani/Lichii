@@ -4,6 +4,8 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <string>
 #include "common/dkb_cpu_trace.h"
 #include "common/fiber.h"
 #include "common/scope_exit.h"
@@ -178,7 +180,21 @@ void CpuManager::RunThread(std::stop_token token, std::size_t core) {
     system.RegisterCoreThread(core);
     std::string name = is_multicore ? ("CPUCore_" + std::to_string(core)) : std::string{"CPUThread"};
     Common::SetCurrentThreadName(name.c_str());
-    Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
+    // Fork do Rodrigo: EDEN_NX2_GUEST_CORE_PRIORITY=high|veryhigh drops the guest cores one or two
+    // steps below the split GPU threads (Critical), so on CPUs with fewer host threads than busy
+    // emulator threads the GPU back, which bounds the frame, wins the core. Unset: Critical.
+    static const Common::ThreadPriority guest_priority = [] {
+        const char* text = std::getenv("EDEN_NX2_GUEST_CORE_PRIORITY");
+        const std::string value = text ? text : "";
+        if (value == "high") {
+            return Common::ThreadPriority::High;
+        }
+        if (value == "veryhigh") {
+            return Common::ThreadPriority::VeryHigh;
+        }
+        return Common::ThreadPriority::Critical;
+    }();
+    Common::SetCurrentThreadPriority(guest_priority);
     Common::SetCurrentThreadToPerformanceCores();
     if (Settings::values.pin_gpu_threads.GetValue()) {
         Common::PinCurrentThread(Common::PinnedRole::GuestCore);
